@@ -29,7 +29,6 @@ import java.io.StringWriter;
 import java.io.Writer;
 import java.net.URI;
 import java.nio.ByteBuffer;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -43,9 +42,11 @@ import java.util.function.BiConsumer;
 import java.util.function.ToIntFunction;
 
 import javax.json.Json;
+import javax.json.JsonArray;
 import javax.json.JsonArrayBuilder;
 import javax.json.JsonObject;
 import javax.json.JsonReader;
+import javax.json.JsonValue;
 import javax.json.stream.JsonParsingException;
 import javax.websocket.MessageHandler;
 
@@ -107,6 +108,7 @@ public class PonySDKWebDriver implements WebDriver {
     private volatile String typeHistory;
     private volatile String url;
     private volatile int contextId;
+    private volatile List<String> stringDictionary;
 
     private ByteBuffer buffer = ByteBuffer.allocate(4096);
 
@@ -233,6 +235,13 @@ public class PonySDKWebDriver implements WebDriver {
             final PonyWebElement element = findElement(message);
             if (element == null) return;
             element.enabled = (boolean) frame.value;
+        });
+        onMessageSwitch.put(ServerToClientModel.STRING_DICTIONARY, (message, frame) -> {
+            final JsonArray jsonArray = ((JsonObject) frame.value).getJsonArray("dictio");
+            stringDictionary = new ArrayList<>();
+            for (final JsonValue value : jsonArray) {
+                stringDictionary.add(value.toString());
+            }
         });
     }
 
@@ -374,69 +383,35 @@ public class PonySDKWebDriver implements WebDriver {
                         value = b.getInt();
                         break;
                     case LONG:
-                        length = readStringLength(b, position, 1, PonySDKWebDriver::readUnsignedByte);
-                        if (length < 0 || length > b.remaining()) {
+                        value = readString(b, 1, PonySDKWebDriver::readUnsignedByte);
+                        if (value == null) {
                             b.position(position);
                             break loop;
                         }
-                        value = readString(StandardCharsets.ISO_8859_1, b, length);
-                        if (value == null) break loop;
                         value = Long.parseLong((String) value);
                         break;
                     case DOUBLE:
-                        length = readStringLength(b, position, 1, PonySDKWebDriver::readUnsignedByte);
-                        if (length < 0 || length > b.remaining()) {
+                        value = readString(b, 1, PonySDKWebDriver::readUnsignedByte);
+                        if (value == null) {
                             b.position(position);
                             break loop;
                         }
-                        value = readString(StandardCharsets.ISO_8859_1, b, length);
-                        if (value == null) break loop;
                         value = Double.parseDouble((String) value);
                         break;
                     case STRING_ASCII:
-                        length = readStringLength(b, position, 2, PonySDKWebDriver::readUnsignedShort);
-                        if (length < 0 || length > b.remaining()) {
-                            b.position(position);
-                            break loop;
-                        }
-                        value = readString(StandardCharsets.ISO_8859_1, b, length);
-                        if (value == null) break loop;
-                        break;
                     case STRING:
-                        if (!b.hasRemaining()) {
+                        value = readString(b, 2, PonySDKWebDriver::readUnsignedShort);
+                        if (value == null) {
                             b.position(position);
                             break loop;
                         }
-
-                        final byte charsetStringType = b.get();
-
-                        length = readStringLength(b, position, 2, PonySDKWebDriver::readUnsignedShort);
-                        if (length < 0 || length > b.remaining()) {
-                            b.position(position);
-                            break loop;
-                        }
-                        value = readString(
-                            charsetStringType == CharsetModel.ASCII.getValue() ? StandardCharsets.ISO_8859_1 : StandardCharsets.UTF_8,
-                            b, length);
-                        if (value == null) break loop;
                         break;
                     case JSON_OBJECT:
-                        if (!b.hasRemaining()) {
+                        value = readString(b, 4, (buff) -> buff.getInt());
+                        if (value == null) {
                             b.position(position);
                             break loop;
                         }
-
-                        final byte charsetJsonType = b.get();
-
-                        length = readStringLength(b, position, 4, (buff) -> buff.getInt());
-                        if (length < 0 || length > b.remaining()) {
-                            b.position(position);
-                            break loop;
-                        }
-                        value = readString(
-                            charsetJsonType == CharsetModel.ASCII.getValue() ? StandardCharsets.ISO_8859_1 : StandardCharsets.UTF_8, b,
-                            length);
-                        if (value == null) break loop;
                         try (JsonReader jsonReader = Json.createReader(new StringReader((String) value))) {
                             value = jsonReader.readObject();
                         } catch (final JsonParsingException e) {
@@ -512,20 +487,22 @@ public class PonySDKWebDriver implements WebDriver {
         return array;
     }
 
-    private static int readStringLength(final ByteBuffer b, final int position, final int lengthOfLength,
-                                        final ToIntFunction<ByteBuffer> sizeRetriever) {
-        if (b.remaining() < lengthOfLength) {
-            b.position(position);
-            return -1;
+    private String readString(final ByteBuffer b, final int lengthOfLength, final ToIntFunction<ByteBuffer> sizeRetriever) {
+        if (!b.hasRemaining()) return null;
+        final byte charsetByte = b.get();
+        if (charsetByte == CharsetModel.STRING_DICTIONARY.getValue()) {
+            if (b.remaining() < 2) return null;
+            final int dictIndex = readUnsignedShort(b);
+            return stringDictionary.get(dictIndex);
         } else {
-            return sizeRetriever.applyAsInt(b);
+            if (b.remaining() < lengthOfLength) return null;
+            final int length = sizeRetriever.applyAsInt(b);
+            if (length < b.remaining()) return null;
+            final byte[] bytes = getLocalByteArray(length);
+            b.get(bytes, 0, length);
+            return new String(bytes, 0, length,
+                charsetByte == CharsetModel.ASCII.getValue() ? StandardCharsets.ISO_8859_1 : StandardCharsets.UTF_8);
         }
-    }
-
-    private static String readString(final Charset charset, final ByteBuffer b, final int length) {
-        final byte[] bytes = getLocalByteArray(length);
-        b.get(bytes, 0, length);
-        return new String(bytes, 0, length, charset);
     }
 
     private ServerToClientModel readModel(final ByteBuffer buffer) {

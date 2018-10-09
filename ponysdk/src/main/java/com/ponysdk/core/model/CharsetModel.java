@@ -26,10 +26,12 @@ package com.ponysdk.core.model;
 public enum CharsetModel {
 
     ASCII(CharsetModel.ASCII_TYPE),
-    UTF8(CharsetModel.UTF8_TYPE);
+    UTF8(CharsetModel.UTF8_TYPE),
+    STRING_DICTIONARY(CharsetModel.STRING_DICTIONARY_TYPE);
 
     public static final int ASCII_TYPE = 0;
     public static final int UTF8_TYPE = 1;
+    public static final int STRING_DICTIONARY_TYPE = 2;
 
     private static final CharsetModel[] VALUES = CharsetModel.values();
 

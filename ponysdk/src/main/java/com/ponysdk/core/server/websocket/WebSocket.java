@@ -85,6 +85,9 @@ public class WebSocket implements WebSocketListener, WebsocketEncoder {
                 encode(ServerToClientModel.CREATE_CONTEXT, uiContext.getID()); // TODO nciaravola integer ?
                 encode(ServerToClientModel.OPTION_FORMFIELD_TABULATION, uiContext.getConfiguration().isTabindexOnlyFormField());
                 endObject();
+                beginObject();
+                websocketPusher.encodeStringDictionary();
+                endObject();
                 if (isAlive() && isSessionOpen()) flush0();
             } catch (final Throwable e) {
                 log.error("Cannot send server heart beat to client", e);
