@@ -24,10 +24,10 @@
 package com.ponysdk.driver;
 
 import java.io.IOException;
-import java.io.StringReader;
 import java.io.StringWriter;
 import java.io.Writer;
 import java.net.URI;
+import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -40,13 +40,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
+import java.util.function.Function;
 import java.util.function.ToIntFunction;
 
 import javax.json.Json;
 import javax.json.JsonArrayBuilder;
 import javax.json.JsonObject;
-import javax.json.JsonReader;
-import javax.json.stream.JsonParsingException;
 import javax.websocket.MessageHandler;
 
 import org.openqa.selenium.By;
@@ -55,6 +54,8 @@ import org.openqa.selenium.WebElement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.ponysdk.core.model.ArrayValueModel;
+import com.ponysdk.core.model.BooleanModel;
 import com.ponysdk.core.model.ClientToServerModel;
 import com.ponysdk.core.model.ServerToClientModel;
 import com.ponysdk.core.model.ValueTypeModel;
@@ -97,8 +98,12 @@ public class PonySDKWebDriver implements WebDriver {
     private final List<PonyFrame> messageInConstruction = new ArrayList<>();
     private final PonyMessageListener messageListener;
     private final PonyBandwithListener bandwithListener;
+    private final boolean handleImplicitCommunication;
 
-    // Use EnumMap instead of normal switch since the latter calls ServerToClientModel::values each time causing enormous garbage
+    /*
+     * Use EnumMap instead of normal switch since, with ecj compiler, ServerToClientModel::values is called on every
+     * switch invocation causing enormous garbage
+     */
     private final EnumMap<ServerToClientModel, BiConsumer<List<PonyFrame>, PonyFrame>> onMessageSwitch = new EnumMap<>(
         ServerToClientModel.class);
 
@@ -107,25 +112,28 @@ public class PonySDKWebDriver implements WebDriver {
     private volatile int contextId;
 
     private ByteBuffer buffer = ByteBuffer.allocate(4096);
+    private int length = 0;
 
     public PonySDKWebDriver() {
-        this(null, null);
+        this(null, null, true);
     }
 
-    public PonySDKWebDriver(final PonyMessageListener messageListener, final PonyBandwithListener bandwithListener) {
+    public PonySDKWebDriver(final PonyMessageListener messageListener, final PonyBandwithListener bandwithListener,
+            final boolean handleImplicitCommunication) {
         super();
+        this.handleImplicitCommunication = handleImplicitCommunication;
         this.messageListener = messageListener == null ? INDIFFERENT_MSG_LISTENER : messageListener;
         this.bandwithListener = bandwithListener == null ? INDIFFERENT_BANDWITH_LISTENER : bandwithListener;
 
         onMessageSwitch.put(ServerToClientModel.CREATE_CONTEXT, (message, frame) -> {
             log.info("UI Context created with ID {}", contextId = (int) frame.value);
-            sendCookies();
+            if (handleImplicitCommunication) sendCookies();
         });
         onMessageSwitch.put(ServerToClientModel.HISTORY_FIRE_EVENTS, (message, frame) -> {
             if ((boolean) frame.getValue()) {
                 final String typeHistory = (String) findValueForModel(message, ServerToClientModel.TYPE_HISTORY);
                 if (typeHistory == null) return;
-                sendTypeHistory(this.typeHistory = typeHistory);
+                if (handleImplicitCommunication) sendTypeHistory(this.typeHistory = typeHistory);
             }
         });
         onMessageSwitch.put(ServerToClientModel.TYPE_ADD, (message, frame) -> {
@@ -204,17 +212,36 @@ public class PonySDKWebDriver implements WebDriver {
         onMessageSwitch.put(ServerToClientModel.OPEN, (message, frame) -> {
             final PonyWebElement element = findElement(message);
             if (element == null) return;
-            element.sendApplicationInstruction(ClientToServerModel.HANDLER_OPEN, "");
-            sendCookies();
+            if (handleImplicitCommunication) {
+                element.sendApplicationInstruction(ClientToServerModel.HANDLER_OPEN, "");
+                sendCookies();
+            }
         });
         onMessageSwitch.put(ServerToClientModel.PING_SERVER, (message, frame) -> {
-            final JsonObject json = Json.createObjectBuilder() //
-                .add(ClientToServerModel.PING_SERVER.toStringValue(), (long) frame.value) //
-                .build();
-            sendMessage(json);
+            if (handleImplicitCommunication) {
+                final JsonObject json = Json.createObjectBuilder() //
+                    .add(ClientToServerModel.PING_SERVER.toStringValue(), (long) frame.value) //
+                    .build();
+                sendMessage(json);
+            }
         });
         onMessageSwitch.put(ServerToClientModel.HEARTBEAT, (message, frame) -> {
-            sendMessage("0");
+            if (handleImplicitCommunication) sendMessage("0");
+        });
+        onMessageSwitch.put(ServerToClientModel.WIDGET_VISIBLE, (message, frame) -> {
+            final PonyWebElement element = findElement(message);
+            if (element == null) return;
+            element.displayed = (boolean) frame.value;
+        });
+        onMessageSwitch.put(ServerToClientModel.ENABLED, (message, frame) -> {
+            final PonyWebElement element = findElement(message);
+            if (element == null) return;
+            element.enabled = (boolean) frame.value;
+        });
+        onMessageSwitch.put(ServerToClientModel.FUNCTION_ARGS, (message, frame) -> {
+            final PonyWebElement element = findElement(message);
+            if (element == null) return;
+            element.text = Arrays.toString((Object[]) frame.value);
         });
         onMessageSwitch.put(ServerToClientModel.WIDGET_VISIBLE, (message, frame) -> {
             final PonyWebElement element = findElement(message);
@@ -314,132 +341,190 @@ public class PonySDKWebDriver implements WebDriver {
         return null;
     }
 
+    private Object readValue(final ByteBuffer b, final int minSize, final Function<ByteBuffer, Object> function) {
+        length += minSize;
+        return function.apply(b);
+    }
+
+    private String getString(final ByteBuffer b) {
+        int stringLength = readUnsignedByte(b);
+        boolean ascii = true;
+        if (stringLength > ValueTypeModel.STRING_ASCII_UINT8_MAX_LENGTH) {
+            switch (stringLength) {
+                case ValueTypeModel.STRING_ASCII_UINT16:
+                    length += 2;
+                    stringLength = readUnsignedShort(b);
+                    break;
+                case ValueTypeModel.STRING_ASCII_INT32:
+                    length += 4;
+                    stringLength = b.getInt();
+                    break;
+                case ValueTypeModel.STRING_UTF8_UINT8:
+                    length += 1;
+                    stringLength = readUnsignedByte(b);
+                    ascii = false;
+                    break;
+                case ValueTypeModel.STRING_UTF8_UINT16:
+                    length += 2;
+                    stringLength = readUnsignedShort(b);
+                    ascii = false;
+                    break;
+                case ValueTypeModel.STRING_UTF8_INT32:
+                    length += 4;
+                    stringLength = b.getInt();
+                    ascii = false;
+                    break;
+                default:
+                    assert false; //unreachable
+            }
+        }
+        length += stringLength;
+        return getString(ascii ? StandardCharsets.ISO_8859_1 : StandardCharsets.UTF_8, b, stringLength);
+    }
+
+    private Object getString(final ByteBuffer b, final Charset charset, final ToIntFunction<ByteBuffer> readStringLength) {
+        final int strLength = readStringLength.applyAsInt(b);
+        length += strLength;
+        return getString(charset, b, strLength);
+    }
+
+    private Object getArray(final ByteBuffer b) {
+        final Object[] array = new Object[readUnsignedByte(b)];
+        length += array.length; //elements types
+        for (int i = 0; i < array.length; i++) {
+            final ArrayValueModel model = readArrayValueModel(b);
+            array[i] = readArrayElementValue(b, model);
+        }
+        return array;
+    }
+
+    private Object readArrayElementValue(final ByteBuffer b, final ArrayValueModel model) {
+        length += model.getMinSize();
+        switch (model) {
+            case NULL:
+                return null;
+            case BOOLEAN_FALSE:
+                return Boolean.FALSE;
+            case BOOLEAN_TRUE:
+                return Boolean.TRUE;
+            case BYTE:
+                return b.get();
+            case SHORT:
+                return b.getShort();
+            case INTEGER:
+                return b.getInt();
+            case LONG:
+                return b.getLong();
+            case DOUBLE:
+                return b.getDouble();
+            case FLOAT:
+                return b.getFloat();
+            case STRING_ASCII_UINT8_LENGTH:
+                return getString(b, StandardCharsets.ISO_8859_1, PonySDKWebDriver::readUnsignedByte);
+            case STRING_ASCII_UINT16_LENGTH:
+                return getString(b, StandardCharsets.ISO_8859_1, PonySDKWebDriver::readUnsignedShort);
+            case STRING_UTF8_UINT8_LENGTH:
+                return getString(b, StandardCharsets.UTF_8, PonySDKWebDriver::readUnsignedByte);
+            case STRING_UTF8_UINT16_LENGTH:
+                return getString(b, StandardCharsets.UTF_8, PonySDKWebDriver::readUnsignedShort);
+            case STRING_UTF8_INT32_LENGTH:
+                return getString(b, StandardCharsets.UTF_8, ByteBuffer::getInt);
+            default:
+                throw new IllegalArgumentException("ArrayValueModel " + model + " is not supported");
+        }
+    }
+
+    private Object readModelValue(final ByteBuffer b, final ValueTypeModel type) {
+        switch (type) {
+            case NULL:
+                return null;
+            case BOOLEAN:
+                return readValue(b, 1, buff -> buff.get() == BooleanModel.TRUE.getValue());
+            case BYTE:
+                return readValue(b, 1, ByteBuffer::get);
+            case SHORT:
+                return readValue(b, 2, ByteBuffer::getShort);
+            case INTEGER:
+                return readValue(b, 4, ByteBuffer::getInt);
+            case LONG:
+                return readValue(b, 8, ByteBuffer::getLong);
+            case DOUBLE:
+                return readValue(b, 8, ByteBuffer::getDouble);
+            case FLOAT:
+                return readValue(b, 4, ByteBuffer::getFloat);
+            case STRING:
+                return readValue(b, 1, this::getString);
+            case ARRAY:
+                return readValue(b, 1, this::getArray);
+            default:
+                throw new IllegalArgumentException("ValueTypeModel " + type + " is not supported");
+        }
+    }
+
     private synchronized void onMessage(final ByteBuffer message) {
         bandwithListener.onReceive(message.remaining());
         while (message.hasRemaining()) {
-            ByteBuffer b;
-            //buffer is in write mode
-            if (buffer.position() == 0) { //buffer has no pending data => use message directly
-                b = message;
-            } else { //buffer has pending data => append message to it
-                if (message.remaining() <= buffer.remaining()) {
-                    buffer.put(message);
-                } else {
-                    final int limit = message.limit();
-                    message.limit(message.position() + buffer.remaining());
-                    buffer.put(message);
-                    message.limit(limit);
-                }
-                buffer.flip();
-                b = buffer;
-            }
+            final ByteBuffer b = prepareBuffer(message);
 
-            int length = 0;
             loop: while (b.hasRemaining()) {
-                Object value = null;
+
                 final int position = b.position();
                 final ServerToClientModel model = readModel(b);
-                final ValueTypeModel typeModel = model.getTypeModel();
-                final int size = typeModel == ValueTypeModel.LONG || typeModel == ValueTypeModel.DOUBLE ? -1 : typeModel.getSize();
-                if (b.remaining() < size) {
+                length = 1;
+                try {
+                    final Object value = readModelValue(b, model.getTypeModel());
+                    onMessage(model, value);
+                } catch (final BufferUnderflowException e) {
                     b.position(position);
                     break loop;
-                }
-                switch (model.getTypeModel()) {
-                    case NULL:
-                        break;
-                    case BOOLEAN:
-                        value = b.get() != 0;
-                        break;
-                    case BYTE:
-                        value = b.get();
-                        break;
-                    case SHORT:
-                        value = b.getShort();
-                        break;
-                    case INTEGER:
-                        value = b.getInt();
-                        break;
-                    case LONG:
-                        length = readStringLength(b, position, 1, PonySDKWebDriver::readUnsignedByte);
-                        if (length < 0 || length > b.remaining()) {
-                            b.position(position);
-                            break loop;
-                        }
-                        value = readString(StandardCharsets.ISO_8859_1, b, length);
-                        if (value == null) break loop;
-                        value = Long.parseLong((String) value);
-                        break;
-                    case DOUBLE:
-                        length = readStringLength(b, position, 1, PonySDKWebDriver::readUnsignedByte);
-                        if (length < 0 || length > b.remaining()) {
-                            b.position(position);
-                            break loop;
-                        }
-                        value = readString(StandardCharsets.ISO_8859_1, b, length);
-                        if (value == null) break loop;
-                        value = Double.parseDouble((String) value);
-                        break;
-                    case STRING:
-                        length = readStringLength(b, position, 2, PonySDKWebDriver::readUnsignedShort);
-                        if (length < 0 || length > b.remaining()) {
-                            b.position(position);
-                            break loop;
-                        }
-                        value = readString(StandardCharsets.ISO_8859_1, b, length);
-                        if (value == null) break loop;
-                        break;
-                    case STRING_UTF8:
-                        length = readStringLength(b, position, 2, PonySDKWebDriver::readUnsignedShort);
-                        if (length < 0 || length > b.remaining()) {
-                            b.position(position);
-                            break loop;
-                        }
-                        value = readString(StandardCharsets.UTF_8, b, length);
-                        if (value == null) break loop;
-                        break;
-                    case JSON_OBJECT:
-                        length = readStringLength(b, position, 4, (buff) -> buff.getInt());
-                        if (length < 0 || length > b.remaining()) {
-                            b.position(position);
-                            break loop;
-                        }
-                        value = readString(StandardCharsets.UTF_8, b, length);
-                        if (value == null) break loop;
-                        try (JsonReader jsonReader = Json.createReader(new StringReader((String) value))) {
-                            value = jsonReader.readObject();
-                        } catch (final JsonParsingException e) {
-                            log.error("Invalid json object : {}", value, e);
-                            value = null;
-                        }
-                        break;
-                }
-                try {
-                    onMessage(model, value);
                 } catch (final PonyIOException e) {
                     log.error("Error when reading message", e);
                     close();
                     return;
                 }
             }
-            length += 5;
-            if (b == message && b.hasRemaining()) {
-                if (buffer.capacity() < length) {
-                    buffer = ByteBuffer.allocate(Math.max(buffer.capacity() << 1, length));
-                }
-                buffer.put(message);
-            } else if (b == buffer && b.hasRemaining()) {
-                if (buffer.capacity() < length) {
-                    buffer = ByteBuffer.allocate(Math.max(buffer.capacity() << 1, length));
-                    buffer.put(b);
-                } else {
-                    b.compact();
-                }
-            } else if (b == buffer && !b.hasRemaining()) {
-                b.clear();
-            }
+
+            postpareBuffer(message, b);
         }
 
+    }
+
+    private ByteBuffer prepareBuffer(final ByteBuffer message) {
+        ByteBuffer b;
+        //buffer is in write mode
+        if (buffer.position() == 0) { //buffer has no pending data => use message directly
+            b = message;
+        } else { //buffer has pending data => append message to it
+            if (message.remaining() <= buffer.remaining()) {
+                buffer.put(message);
+            } else {
+                final int limit = message.limit();
+                message.limit(message.position() + buffer.remaining());
+                buffer.put(message);
+                message.limit(limit);
+            }
+            buffer.flip();
+            b = buffer;
+        }
+        return b;
+    }
+
+    private void postpareBuffer(final ByteBuffer message, final ByteBuffer b) {
+        if (b == message && b.hasRemaining()) {
+            if (buffer.capacity() < length) {
+                buffer = ByteBuffer.allocate(Math.max(buffer.capacity() << 1, length));
+            }
+            buffer.put(message);
+        } else if (b == buffer && b.hasRemaining()) {
+            if (buffer.capacity() < length) {
+                buffer = ByteBuffer.allocate(Math.max(buffer.capacity() << 1, length));
+                buffer.put(b);
+            } else {
+                b.compact();
+            }
+        } else if (b == buffer && !b.hasRemaining()) {
+            b.clear();
+        }
     }
 
     private void onMessage(final ServerToClientModel model, final Object value) {
@@ -481,17 +566,7 @@ public class PonySDKWebDriver implements WebDriver {
         return array;
     }
 
-    private static int readStringLength(final ByteBuffer b, final int position, final int lengthOfLength,
-                                        final ToIntFunction<ByteBuffer> sizeRetriever) {
-        if (b.remaining() < lengthOfLength) {
-            b.position(position);
-            return -1;
-        } else {
-            return sizeRetriever.applyAsInt(b);
-        }
-    }
-
-    private static String readString(final Charset charset, final ByteBuffer b, final int length) {
+    private static String getString(final Charset charset, final ByteBuffer b, final int length) {
         final byte[] bytes = getLocalByteArray(length);
         b.get(bytes, 0, length);
         return new String(bytes, 0, length, charset);
@@ -501,8 +576,12 @@ public class PonySDKWebDriver implements WebDriver {
         return ServerToClientModel.fromRawValue(readUnsignedByte(buffer));
     }
 
-    private static short readUnsignedByte(final ByteBuffer buffer) {
-        return (short) (buffer.get() & 0xFF);
+    private ArrayValueModel readArrayValueModel(final ByteBuffer buffer) {
+        return ArrayValueModel.fromRawValue(buffer.get());
+    }
+
+    private static int readUnsignedByte(final ByteBuffer buffer) {
+        return buffer.get() & 0xFF;
     }
 
     private static int readUnsignedShort(final ByteBuffer buffer) {
@@ -565,6 +644,10 @@ public class PonySDKWebDriver implements WebDriver {
 
     public void clear() {
         elements.clear();
+    }
+
+    public boolean isHandleImplicitCommunication() {
+        return handleImplicitCommunication;
     }
 
 }

@@ -55,18 +55,19 @@ import com.ponysdk.core.terminal.ui.PTWindowManager;
 
 import elemental.client.Browser;
 import elemental.html.Uint8Array;
-import elemental.js.util.JsMapFromIntTo;
-import elemental.js.util.JsMapFromStringTo;
+import elemental.util.Collections;
+import elemental.util.MapFromIntTo;
+import elemental.util.MapFromStringTo;
 
 public class UIBuilder {
 
     private static final Logger log = Logger.getLogger(UIBuilder.class.getName());
 
     private final UIFactory uiFactory = new UIFactory();
-    private final JsMapFromIntTo<PTObject> objectByID = JsMapFromIntTo.create();
+    private final MapFromIntTo<PTObject> objectByID = Collections.mapFromIntTo();
     private final Map<UIObject, Integer> objectIDByWidget = new HashMap<>();
-    private final JsMapFromIntTo<UIObject> widgetIDByObjectID = JsMapFromIntTo.create();
-    private final JsMapFromStringTo<JavascriptAddOnFactory> javascriptAddOnFactories = JsMapFromStringTo.create();
+    private final MapFromIntTo<UIObject> widgetIDByObjectID = Collections.mapFromIntTo();
+    private final MapFromStringTo<JavascriptAddOnFactory> javascriptAddOnFactories = Collections.mapFromStringTo();
 
     private final ReaderBuffer readerBuffer = new ReaderBuffer();
 
@@ -217,7 +218,7 @@ public class UIBuilder {
 
     private void processCreate(final ReaderBuffer buffer, final int objectID) {
         // ServerToClientModel.WIDGET_TYPE
-        final WidgetType widgetType = WidgetType.fromRawValue(buffer.readBinaryModel().getByteValue());
+        final WidgetType widgetType = WidgetType.fromRawValue(buffer.readBinaryModel().getIntValue());
 
         final PTObject ptObject = uiFactory.newUIObject(widgetType);
         if (ptObject != null) {
@@ -263,7 +264,8 @@ public class UIBuilder {
             } while (result && buffer.hasEnoughKeyBytes());
 
             if (!result && ServerToClientModel.END != binaryModel.getModel()) {
-                log.warning("Update PObject #" + objectID + " with key : " + binaryModel + " doesn't exist");
+                log.warning("Update " + ptObject.getClass().getSimpleName() + " #" + objectID + " with key : " + binaryModel
+                        + " doesn't exist");
                 buffer.shiftNextBlock(false);
             }
         } else {
@@ -293,7 +295,7 @@ public class UIBuilder {
 
     private void processAddHandler(final ReaderBuffer buffer, final int objectID) {
         // ServerToClientModel.HANDLER_TYPE
-        final HandlerModel handlerModel = HandlerModel.fromRawValue(buffer.readBinaryModel().getByteValue());
+        final HandlerModel handlerModel = HandlerModel.fromRawValue(buffer.readBinaryModel().getIntValue());
 
         if (HandlerModel.HANDLER_STREAM_REQUEST == handlerModel) {
             new PTStreamResource().addHandler(buffer, handlerModel);
@@ -314,7 +316,7 @@ public class UIBuilder {
         final PTObject ptObject = getPTObject(objectID);
         if (ptObject != null) {
             // ServerToClientModel.HANDLER_TYPE
-            final HandlerModel handlerModel = HandlerModel.fromRawValue(buffer.readBinaryModel().getByteValue());
+            final HandlerModel handlerModel = HandlerModel.fromRawValue(buffer.readBinaryModel().getIntValue());
             ptObject.removeHandler(buffer, handlerModel);
             buffer.readBinaryModel(); // Read ServerToClientModel.END element
         } else {
@@ -456,8 +458,8 @@ public class UIBuilder {
         this.javascriptAddOnFactories.put(signature, javascriptAddOnFactory);
     }
 
-    public JsMapFromStringTo<JavascriptAddOnFactory> getJavascriptAddOnFactory() {
-        return javascriptAddOnFactories;
+    public JavascriptAddOnFactory getJavascriptAddOnFactory(final String signature) {
+        return javascriptAddOnFactories.get(signature);
     }
 
     void setReadyWindow(final int windowID) {

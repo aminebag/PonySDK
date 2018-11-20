@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2011 PonySDK
+ * Copyright (c) 2018 PonySDK
  *  Owners:
  *  Luciano Broussal  <luciano.broussal AT gmail.com>
- *  Mathieu Barbier   <mathieu.barbier AT gmail.com>
- *  Nicolas Ciaravola <nicolas.ciaravola.pro AT gmail.com>
+ *	Mathieu Barbier   <mathieu.barbier AT gmail.com>
+ *	Nicolas Ciaravola <nicolas.ciaravola.pro AT gmail.com>
  *
  *  WebSite:
  *  http://code.google.com/p/pony-sdk/
@@ -21,23 +21,15 @@
  * the License.
  */
 
-package com.ponysdk.core.ui.eventbus;
+package com.ponysdk.core.terminal.ui;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Set;
-import java.util.WeakHashMap;
+import com.google.gwt.core.client.JavaScriptObject;
 
-public class RootEventBus extends AbstractEventBus {
+import jsinterop.annotations.JsFunction;
 
-    @Override
-    protected HashMap<Object, Set<EventHandler>> createEventHandlerMap() {
-        return new HashMap<>();
-    }
+@JsFunction
+public interface JsTextFunction {
 
-    @Override
-    protected Set<EventHandler> createHandlerSet() {
-        return Collections.newSetFromMap(new WeakHashMap<>());
-    }
+    String apply(JavaScriptObject args);
 
 }

@@ -38,10 +38,13 @@ import com.ponysdk.core.ui.form.validator.ValidationResult;
 import com.ponysdk.core.util.SetUtils;
 
 /**
- * A field of a {@link com.ponysdk.core.ui.form.Form} that can be validated or
- * reset
+ * A field of a {@link com.ponysdk.core.ui.form.Form} that can be validated or reset
  */
 public abstract class AbstractFormField<T, W extends IsPWidget> implements FormField, HasPValue<T> {
+
+    public static final String CLASS_FORM_FIELD_VALIDATOR = "form-field-validator";
+    public static final String DATA_TITLE = "data-title";
+    public static final String CLASS_INVALID = "invalid";
 
     protected final W widget;
     private Set<FormFieldListener> listeners;
@@ -53,9 +56,12 @@ public abstract class AbstractFormField<T, W extends IsPWidget> implements FormF
     private PValueChangeHandler<T> dirtyModeHandler;
 
     private boolean enabled = true;
+    private boolean showError = true;
 
     public AbstractFormField() {
         this(null);
+        // If no widget, no error will be showed
+        this.showError = false;
     }
 
     public AbstractFormField(final W widget) {
@@ -75,7 +81,10 @@ public abstract class AbstractFormField<T, W extends IsPWidget> implements FormF
             this.addValueChangeHandler(dirtyModeHandler);
         }
 
-        if (this.widget != null) this.widget.asWidget().addDestroyListener(event -> onDestroy());
+        if (this.widget != null) {
+            this.widget.asWidget().addStyleName(CLASS_FORM_FIELD_VALIDATOR);
+            this.widget.asWidget().addDestroyListener(event -> onDestroy());
+        }
     }
 
     private void onDestroy() {
@@ -87,6 +96,15 @@ public abstract class AbstractFormField<T, W extends IsPWidget> implements FormF
         ValidationResult result;
         if (enabled && validator != null) result = validator.isValid(getStringValue());
         else result = ValidationResult.newOKValidationResult();
+
+        if (showError) {
+            if (result.isValid()) {
+                resetError();
+            } else {
+                widget.asWidget().addStyleName(CLASS_INVALID);
+                widget.asWidget().setAttribute(DATA_TITLE, result.getErrorMessage());
+            }
+        }
 
         fireAfterValidation(result);
 
@@ -106,16 +124,22 @@ public abstract class AbstractFormField<T, W extends IsPWidget> implements FormF
 
     @Override
     public void reset() {
+        if (showError) resetError();
         reset0();
         dirty = false;
         fireAfterReset();
     }
 
-    private void fireAfterReset() {
+    public void resetError() {
+        widget.asWidget().removeStyleName(CLASS_INVALID);
+        widget.asWidget().removeAttribute(DATA_TITLE);
+    }
+
+    protected void fireAfterReset() {
         if (listeners != null) listeners.forEach(listener -> listener.afterReset(this));
     }
 
-    private void fireAfterValidation(final ValidationResult result) {
+    protected void fireAfterValidation(final ValidationResult result) {
         if (listeners != null) listeners.forEach(listener -> listener.afterValidation(this, result));
     }
 
@@ -174,6 +198,10 @@ public abstract class AbstractFormField<T, W extends IsPWidget> implements FormF
      */
     public boolean isDirty() {
         return dirty;
+    }
+
+    public void setShowError(final boolean showError) {
+        this.showError = showError;
     }
 
 }

@@ -38,6 +38,7 @@ import com.ponysdk.core.ui.basic.event.PCloseEvent;
 import com.ponysdk.core.ui.basic.event.PCloseHandler;
 import com.ponysdk.core.ui.basic.event.POpenEvent;
 import com.ponysdk.core.ui.basic.event.POpenHandler;
+import com.ponysdk.core.ui.formatter.TextFunction;
 import com.ponysdk.core.util.SetUtils;
 import com.ponysdk.core.writer.ModelWriter;
 
@@ -56,6 +57,8 @@ public class PWindow extends PObject {
     private final Location location;
 
     private Map<String, PRootPanel> panelByZone = new HashMap<>(8);
+
+    private Map<TextFunction, PFunction> functions;
 
     private PWindow parent;
 
@@ -129,7 +132,7 @@ public class PWindow extends PObject {
         if (!initialized) {
             final ModelWriter writer = Txn.get().getWriter();
             writer.beginObject();
-            if (window != PWindow.getMain()) writer.write(ServerToClientModel.WINDOW_ID, window.getID());
+            if (!isMain(window)) writer.write(ServerToClientModel.WINDOW_ID, window.getID());
             writer.write(ServerToClientModel.TYPE_CREATE, ID);
             writer.write(ServerToClientModel.WIDGET_TYPE, getWidgetType().getValue());
             enrichForCreation(writer);
@@ -233,6 +236,15 @@ public class PWindow extends PObject {
     }
 
     /**
+     * The Location.reload() method reloads the resource from the current URL
+     *
+     * @see <a href="https://developer.mozilla.org/en-US/docs/Web/API/Location/reload">MDN</a>
+     */
+    public void reload() {
+        saveUpdate(writer -> writer.write(ServerToClientModel.RELOAD));
+    }
+
+    /**
      * The Window.close() method closes the current window, or the window on which it was called.
      *
      * @see <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/close">MDN</a>
@@ -325,6 +337,10 @@ public class PWindow extends PObject {
         return url;
     }
 
+    public String getName() {
+        return name;
+    }
+
     public void clear() {
         panelByZone.forEach((key, value) -> value.clear());
     }
@@ -360,6 +376,23 @@ public class PWindow extends PObject {
 
     public PWindow getParent() {
         return parent;
+    }
+
+    PFunction getPFunction(final TextFunction function) {
+        return safeFunctions().computeIfAbsent(function, this::createPFunction);
+    }
+
+    private Map<TextFunction, PFunction> safeFunctions() {
+        if (functions == null) {
+            functions = new HashMap<>();
+        }
+        return functions;
+    }
+
+    private PFunction createPFunction(final TextFunction function) {
+        final PFunction pf = new PFunction(function);
+        pf.attach(this, null);
+        return pf;
     }
 
     @Override
