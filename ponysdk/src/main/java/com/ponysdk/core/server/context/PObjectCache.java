@@ -35,8 +35,6 @@ import org.slf4j.LoggerFactory;
 import com.ponysdk.core.model.ServerToClientModel;
 import com.ponysdk.core.server.stm.Txn;
 import com.ponysdk.core.ui.basic.PObject;
-import com.ponysdk.core.ui.basic.PWindow;
-import com.ponysdk.core.ui.basic.PWindowManager;
 import com.ponysdk.core.writer.ModelWriter;
 
 public class PObjectCache {
@@ -57,8 +55,7 @@ public class PObjectCache {
     public PObject get(final int objectID) {
         expungeStaleEntries();
         final Reference<PObject> value = referenceByObjectID.get(objectID);
-        if (value == null) return null;
-        return value.get();
+        return value != null ? value.get() : null;
     }
 
     private void expungeStaleEntries() {
@@ -71,12 +68,8 @@ public class PObjectCache {
             final int frameID = reference.getFrameID();
             if (log.isDebugEnabled()) log.debug("Removing reference on object #{} in window #{}", objectID, windowID);
 
-            // No need to send to the terminal if the window doesn't exist any more
-            if (PWindowManager.getWindow(windowID) == null) continue;
-
             final ModelWriter writer = Txn.get().getWriter();
-            writer.beginObject();
-            if (windowID != -1 && PWindow.getMain().getID() != windowID) writer.write(ServerToClientModel.WINDOW_ID, windowID);
+            writer.beginObject(windowID);
             if (frameID != -1) writer.write(ServerToClientModel.FRAME_ID, frameID);
             writer.write(ServerToClientModel.TYPE_GC, objectID);
             writer.endObject();
